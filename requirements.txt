@@ -1,2 +1,6 @@
-streamlit
-pandas
+streamlit>=1.36
+numpy>=1.24
+matplotlib>=3.7
+simpeg>=0.24
+discretize>=0.10
+pymatsolver>=0.3
