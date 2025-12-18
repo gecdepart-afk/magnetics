@@ -12,7 +12,6 @@ from simpeg.potential_fields.magnetics import receivers, sources, simulation
 # Helpers: rotations
 # ---------------------------
 def Rz(deg: float) -> np.ndarray:
-    """Rotation around +Z (degrees)."""
     a = np.deg2rad(deg)
     ca, sa = np.cos(a), np.sin(a)
     return np.array([[ca, -sa, 0.0],
@@ -20,13 +19,11 @@ def Rz(deg: float) -> np.ndarray:
                      [0.0, 0.0, 1.0]])
 
 def Rx(deg: float) -> np.ndarray:
-    """Rotation around +X (degrees)."""
     a = np.deg2rad(deg)
     ca, sa = np.cos(a), np.sin(a)
     return np.array([[1.0, 0.0, 0.0],
                      [0.0,  ca, -sa],
                      [0.0,  sa,  ca]])
-
 
 def build_dyke_mask(mesh: TensorMesh,
                     center_xyz=(0.0, 0.0, -45.0),
@@ -37,35 +34,22 @@ def build_dyke_mask(mesh: TensorMesh,
                     strike_deg=0.0,
                     dip_deg=90.0) -> np.ndarray:
     """
-    Build a 'dyke-like' prism mask by defining a local coordinate system for the dyke:
-      - u axis: across-dyke (controls width)
-      - v axis: along-strike (controls length)
-      - w axis: normal to dyke plane (thin direction) is not used; instead we bound by depth (z_top/z_bottom)
-
-    We implement strike by rotating around Z, and dip by rotating around X AFTER strike rotation.
-    This is a teaching-friendly approximation: you get a tilted/rotated dyke volume.
+    Dyke defined in a local frame (across-strike, along-strike) then rotated back.
+    Depth bounds are applied in global z (simple + robust for teaching).
     """
     cc = mesh.cell_centers
     cx, cy, cz = center_xyz
-
-    # Shift to dyke center
     p = cc - np.array([cx, cy, cz])
 
-    # Define rotation: first align strike in map view, then dip it
-    # Local coordinates = (R * p^T)^T
-    # Choose strike rotation about Z, then dip about X (in the rotated frame)
+    # strike rotation about Z, then dip (tilt) about X
     R = Rx(90.0 - dip_deg) @ Rz(strike_deg)
     ploc = (R @ p.T).T
 
-    # In local coords:
-    # ploc[:,0] ~ across-dyke (width)
-    # ploc[:,1] ~ along-strike (length)
-    # Depth is still controlled in global z for simplicity (robust for students)
     half_w = width / 2.0
     half_L = length / 2.0
 
-    xloc = ploc[:, 0]
-    yloc = ploc[:, 1]
+    xloc = ploc[:, 0]     # across-dyke
+    yloc = ploc[:, 1]     # along-strike
     zglob = cc[:, 2]
 
     mask = (
@@ -85,60 +69,82 @@ def make_mesh(cs: float, nx: int, ny: int, nz: int) -> TensorMesh:
     return TensorMesh([hx, hy, hz], x0="CCC")
 
 
+def make_profile(line_length: float, n_pts: int,
+                 azimuth_deg: float, offset_m: float,
+                 z_obs: float) -> np.ndarray:
+    """
+    Build a 1D profile line in x-y:
+      - azimuth_deg: 0 = along +x, 90 = along +y (mathematical convention)
+      - offset_m: shift perpendicular to the profile direction
+    """
+    t = np.linspace(-line_length / 2.0, line_length / 2.0, n_pts)
+
+    a = np.deg2rad(azimuth_deg)
+    u = np.array([np.cos(a), np.sin(a)])          # along-profile unit vector
+    v = np.array([-np.sin(a), np.cos(a)])         # left-perp unit vector
+
+    xy = np.outer(t, u) + offset_m * v[None, :]
+    x = xy[:, 0]
+    y = xy[:, 1]
+    z = np.ones_like(x) * float(z_obs)
+
+    return np.c_[x, y, z], t
+
+
 def main():
-    st.set_page_config(page_title="SimPEG Magnetics – Dyke Demo", layout="wide")
-    st.title("SimPEG Magnetics – Dyke forward modelling (interactive)")
+    st.set_page_config(page_title="Fast 1D Dyke Magnetics (SimPEG)", layout="wide")
+    st.title("Fast 1D magnetic forward modelling – dyke strike/dip vs profile direction")
 
     st.markdown(
-        "This app models a dyke-like prism with **induced magnetization only** (susceptibility χ). "
-        "You can rotate **the inducing field** (incl/decl) and rotate/tilt the **dyke geometry** (strike/dip)."
+        "This is **induced magnetization only** (susceptibility χ). "
+        "To clearly see dyke rotation in **1D**, change the **profile azimuth** and **offset**."
     )
 
     with st.sidebar:
-        st.header("Mesh / performance")
+        st.header("Mesh (keep moderate for speed)")
         cs = st.slider("Cell size (m)", 10.0, 40.0, 20.0, 5.0)
-        nx = st.slider("Nx cells", 20, 80, 40, 5)
-        ny = st.slider("Ny cells", 20, 120, 60, 10)
-        nz = st.slider("Nz cells", 15, 60, 30, 5)
+        nx = st.slider("Nx", 20, 80, 40, 5)
+        ny = st.slider("Ny", 20, 120, 60, 10)
+        nz = st.slider("Nz", 15, 60, 30, 5)
 
-        st.header("Dyke parameters")
-        chi_dyke = st.slider("Dyke susceptibility χ (SI)", 0.0, 0.2, 0.05, 0.005)
-        width = st.slider("Dyke width (m)", 10.0, 200.0, 40.0, 5.0)
-        length = st.slider("Dyke length (m)", 100.0, 2000.0, 500.0, 50.0)
-        z_top = st.slider("Top depth z_top (m, negative)", -5.0, -200.0, -10.0, 5.0)
-        z_bottom = st.slider("Bottom depth z_bottom (m, negative)", -10.0, -400.0, -80.0, 10.0)
+        st.header("Dyke")
+        chi_dyke = st.slider("χ dyke (SI)", 0.0, 0.2, 0.05, 0.005)
+        width = st.slider("width (m)", 10.0, 200.0, 40.0, 5.0)
+        length = st.slider("length (m)", 100.0, 1500.0, 400.0, 50.0)  # shorter helps see strike effects
+        z_top = st.slider("z_top (m, negative)", -5.0, -200.0, -10.0, 5.0)
+        z_bottom = st.slider("z_bottom (m, negative)", -10.0, -400.0, -80.0, 10.0)
 
-        strike = st.slider("Strike (deg)", 0.0, 360.0, 0.0, 5.0)
-        dip = st.slider("Dip (deg)", 10.0, 90.0, 90.0, 5.0)
+        strike = st.slider("strike (deg)", 0.0, 360.0, 0.0, 5.0)
+        dip = st.slider("dip (deg)", 10.0, 90.0, 90.0, 5.0)
 
         st.header("Inducing field")
-        B0 = st.slider("Field amplitude (nT)", 20000, 70000, 50000, 1000)
-        inc = st.slider("Inclination (deg)", -90.0, 90.0, 60.0, 5.0)
-        dec = st.slider("Declination (deg)", -180.0, 180.0, 0.0, 5.0)
+        B0 = st.slider("B0 (nT)", 20000, 70000, 50000, 1000)
+        inc = st.slider("inclination (deg)", -90.0, 90.0, 60.0, 5.0)
+        dec = st.slider("declination (deg)", -180.0, 180.0, 0.0, 5.0)
 
-        st.header("Survey")
-        x_min, x_max = st.slider("Profile x-range (m)", -1000, 1000, (-200, 200), 50)
-        n_pts = st.slider("Number of points", 51, 401, 161, 10)
-        y_line = st.slider("Profile y (m)", -500, 500, 0, 10)
-        z_obs = st.slider("Observation z (m)", -50, 50, 0, 1)
+        st.header("1D Profile (this is the key)")
+        line_length = st.slider("profile length (m)", 200.0, 2000.0, 600.0, 50.0)
+        n_pts = st.slider("number of points", 51, 301, 161, 10)
+        prof_az = st.slider("profile azimuth (deg)", 0.0, 180.0, 0.0, 5.0)
+        offset = st.slider("profile offset (m)", -300.0, 300.0, 120.0, 10.0)
+        z_obs = st.slider("observation z (m)", -50.0, 50.0, 0.0, 1.0)
 
-        plot_slice = st.checkbox("Plot susceptibility x–z slice", value=True)
+        show_slice = st.checkbox("Show x–z susceptibility slice (fast)", value=True)
 
-        run = st.button("Run forward model")
+        run = st.button("Run")
 
     if not run:
-        st.info("Set parameters in the sidebar, then click **Run forward model**.")
+        st.info("Adjust parameters and click **Run**.")
+        st.caption("Tip: set dyke strike = 90° and profile azimuth = 0° (or vice versa) and offset ≠ 0 to see changes clearly.")
         return
 
-    # ---------------------------
-    # Build mesh + model
-    # ---------------------------
+    # Mesh
     mesh = make_mesh(cs, nx, ny, nz)
 
+    # Model
     model = np.zeros(mesh.nC)
     active_cells = np.ones(mesh.nC, dtype=bool)
 
-    # Dyke centered roughly in the middle
     center_xyz = (0.0, 0.0, 0.5 * (z_top + z_bottom))
     dyke_mask = build_dyke_mask(
         mesh,
@@ -152,14 +158,10 @@ def main():
     )
     model[dyke_mask] = chi_dyke
 
-    # ---------------------------
-    # Survey
-    # ---------------------------
-    x_profile = np.linspace(x_min, x_max, n_pts)
-    y_profile = np.ones_like(x_profile) * float(y_line)
-    z_profile = np.ones_like(x_profile) * float(z_obs)
+    # 1D profile locations
+    locs, t = make_profile(line_length, n_pts, prof_az, offset, z_obs)
+    rx = receivers.Point(locs, components=["tmi"])
 
-    rx = receivers.Point(np.c_[x_profile, y_profile, z_profile], components=["tmi"])
     src_field = sources.UniformBackgroundField(
         receiver_list=[rx],
         amplitude=float(B0),
@@ -168,9 +170,7 @@ def main():
     )
     survey = magnetics.Survey(src_field)
 
-    # ---------------------------
-    # Forward simulation
-    # ---------------------------
+    # Forward
     sim = simulation.Simulation3DIntegral(
         mesh=mesh,
         survey=survey,
@@ -178,36 +178,37 @@ def main():
         active_cells=active_cells,
         store_sensitivities="ram",
     )
-
     tmi = sim.dpred(model)
 
-    # ---------------------------
-    # Plot results
-    # ---------------------------
+    # Plots
     col1, col2 = st.columns(2)
 
     with col1:
-        fig1 = plt.figure()
-        plt.plot(x_profile, tmi)
-        plt.xlabel("x (m)")
+        fig = plt.figure()
+        plt.plot(t, tmi)
+        plt.xlabel("Distance along profile (m)")
         plt.ylabel("TMI anomaly (nT)")
-        plt.title("TMI profile (induced magnetization, SimPEG)")
+        plt.title("1D TMI profile")
         plt.grid(True)
-        st.pyplot(fig1)
+        st.pyplot(fig)
+
+        st.caption(
+            f"Profile azimuth = {prof_az:.0f}°, offset = {offset:.0f} m | "
+            f"Dyke strike = {strike:.0f}°, dip = {dip:.0f}°"
+        )
 
     with col2:
-        if plot_slice:
-            # x–z slice at y ≈ y_line
+        if show_slice:
             nx_c, ny_c, nz_c = mesh.shape_cells
             m3d = model.reshape((nx_c, ny_c, nz_c), order="F")
 
+            # slice at y ≈ 0 just for geometry visibility
             y_centers = mesh.cell_centers_y
-            iy = int(np.argmin(np.abs(y_centers - float(y_line))))
+            iy0 = int(np.argmin(np.abs(y_centers - 0.0)))
 
             x_centers = mesh.cell_centers_x
             z_centers = mesh.cell_centers_z
-
-            slice_xz = m3d[:, iy, :].T
+            slice_xz = m3d[:, iy0, :].T
 
             fig2 = plt.figure()
             plt.imshow(
@@ -218,15 +219,15 @@ def main():
             )
             plt.xlabel("x (m)")
             plt.ylabel("z (m)")
-            plt.title(f"Susceptibility slice (x–z) at y ≈ {y_centers[iy]:.1f} m")
+            plt.title("Susceptibility slice (x–z) at y ≈ 0 (geometry check)")
             plt.colorbar(label="χ (SI)")
             st.pyplot(fig2)
         else:
-            st.write("Susceptibility slice disabled.")
+            st.write("Slice disabled.")
 
-    st.markdown(
-        "**Teaching note:** In this app, the anomaly depends on **(1) field inclination/declination** and "
-        "**(2) dyke strike/dip**, because magnetics is a **vector + geometry** problem, not just ± polarity."
+    st.success(
+        "If strike changes still look subtle: increase |offset|, shorten dyke length, "
+        "or set profile azimuth very different from dyke strike (e.g., 0° vs 90°)."
     )
 
 
